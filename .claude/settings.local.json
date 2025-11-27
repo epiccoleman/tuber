@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod init:*)",
+      "Bash(go get:*)",
+      "Bash(go build:*)",
+      "Bash(~/bin/ytd:*)",
+      "Bash(/usr/local/go/bin/go build:*)",
+      "Bash(/usr/local/go/bin/go mod:*)",
+      "Bash(/Users/eric/bin/ytd)",
+      "Bash(chmod:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
