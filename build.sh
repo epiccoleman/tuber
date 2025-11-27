@@ -1,4 +1,4 @@
 #!/bin/bash
 set -e
-go build -o ~/bin/tuber .
-echo "Built ~/bin/tuber"
+go build -o ./tuber .
+echo "Built ./tuber"
