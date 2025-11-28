@@ -8,7 +8,10 @@
       "Bash(/usr/local/go/bin/go build:*)",
       "Bash(/usr/local/go/bin/go mod:*)",
       "Bash(/Users/eric/bin/ytd)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(plutil:*)",
+      "Bash(defaults read:*)",
+      "Bash(defaults export com.googlecode.iterm2 -)"
     ],
     "deny": [],
     "ask": []
