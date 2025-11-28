@@ -21,9 +21,9 @@ Built ./tuber
 
 # Usage
 
-Run `tuber` or `tuber https://www.youtube.com/watch?v=lXMskKTw3Bc" to launch in "interactive mode". This is pretty self-explanatory, you'll figure it out. Use space to select which options you want, hit enter, off to the races. You can also hit `e` to edit the filename and / or output path. 
+Run `tuber` or `tuber https://www.youtube.com/watch?v=lXMskKTw3Bc"` to launch in "interactive mode". This is pretty self-explanatory, you'll figure it out. Use space to select which options you want, hit enter, off to the races. You can also hit `e` to edit the filename and / or output path. 
 
-[!tuber screenshot](/screenshots/tuber.png)
+![tuber screenshot](/screenshots/tuber.png)
 
 ## Summaries
 
@@ -35,7 +35,7 @@ You can press 'p' in the UI to alter the default prompt if you like.
 
 Example: 
 
-[!tuber summary](/screenshots/summary.png)
+![tuber summary](/screenshots/summary.png)
 
 ## Command-Line Flags
 
