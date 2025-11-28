@@ -7,23 +7,37 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Download modes
-type Mode int
+// Download options (can be combined)
+type DownloadOptions struct {
+	Video   bool
+	Audio   bool
+	Subs    bool
+	Summary bool
+}
 
-const (
-	ModeVideo Mode = iota
-	ModeAudio
-	ModeSubs
-	ModeAll
-	ModeSummary
-)
-
-func (m Mode) String() string {
-	return [...]string{"Video", "Audio", "Subtitles", "All", "Summary"}[m]
+func (d DownloadOptions) String() string {
+	var parts []string
+	if d.Video {
+		parts = append(parts, "Video")
+	}
+	if d.Audio {
+		parts = append(parts, "Audio")
+	}
+	if d.Subs {
+		parts = append(parts, "Subtitles")
+	}
+	if d.Summary {
+		parts = append(parts, "Summary")
+	}
+	if len(parts) == 0 {
+		return "Nothing"
+	}
+	return strings.Join(parts, " + ")
 }
 
 // UI State
@@ -40,7 +54,7 @@ type model struct {
 	url       string
 	choices   []string
 	cursor    int
-	selected  Mode
+	checked   []bool // which options are checked
 	done      bool
 	quitting  bool
 	title     string
@@ -76,11 +90,26 @@ func initialModel(url string) model {
 		dir = outputDir
 	}
 
+	summaryLabel := "Summary"
+	if !claudeAvailable {
+		summaryLabel = "Summary (install claude cli)"
+	}
+
 	return model{
 		url:     url,
-		choices: []string{"Video (best quality)", "Audio (mp3)", "Subtitles (text)", "All of the above", "Summary (AI)"},
+		choices: []string{"Video", "Audio", "Subtitles", summaryLabel},
+		checked: make([]bool, 4),
 		state:   state,
 		outPath: dir + "/video", // fallback
+	}
+}
+
+func (m model) getOptions() DownloadOptions {
+	return DownloadOptions{
+		Video:   m.checked[0],
+		Audio:   m.checked[1],
+		Subs:    m.checked[2],
+		Summary: m.checked[3],
 	}
 }
 
@@ -161,10 +190,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.choices)-1 {
 				m.cursor++
 			}
-		case "enter", " ":
-			m.selected = Mode(m.cursor)
-			m.done = true
-			return m, tea.Quit
+		case " ", "x":
+			// Toggle checkbox (but not Summary if claude unavailable)
+			if m.cursor == 3 && !claudeAvailable {
+				// Can't toggle summary without claude
+				break
+			}
+			m.checked[m.cursor] = !m.checked[m.cursor]
+		case "enter":
+			// Submit if at least one option selected
+			opts := m.getOptions()
+			if opts.Video || opts.Audio || opts.Subs || opts.Summary {
+				m.done = true
+				return m, tea.Quit
+			}
 		case "e":
 			m.editing = true
 			m.editBuf = m.outPath
@@ -240,7 +279,13 @@ func (m model) View() string {
 			cursor = "▸ "
 			style = selectedStyle
 		}
-		s += cursor + style.Render(choice) + "\n"
+
+		checkbox := "[ ]"
+		if m.checked[i] {
+			checkbox = "[x]"
+		}
+
+		s += cursor + checkbox + " " + style.Render(choice) + "\n"
 	}
 
 	// Show filename preview
@@ -250,69 +295,233 @@ func (m model) View() string {
 		s += dimStyle.Render("enter to confirm • esc to cancel")
 	} else {
 		s += dimStyle.Render("Output: ") + filenameStyle.Render(m.getFilenames()) + "\n"
-		s += "\n" + dimStyle.Render("↑/↓ navigate • enter select • e edit path • q quit")
+		s += "\n" + dimStyle.Render("↑/↓ navigate • space toggle • enter download • e edit path • q quit")
 	}
 	return s
 }
 
 func (m model) getFilenames() string {
-	mode := Mode(m.cursor)
-	switch mode {
-	case ModeVideo:
-		return m.outPath + ".mp4"
-	case ModeAudio:
-		return m.outPath + ".mp3"
-	case ModeSubs:
-		return m.outPath + ".txt"
-	case ModeAll:
-		return m.outPath + ".{mp4,mp3,txt}"
-	case ModeSummary:
-		return "(summary printed to stdout)"
+	opts := m.getOptions()
+	var exts []string
+
+	if opts.Video {
+		exts = append(exts, ".mp4")
 	}
-	return ""
+	if opts.Audio {
+		exts = append(exts, ".mp3")
+	}
+	if opts.Subs {
+		exts = append(exts, ".txt")
+	}
+	if opts.Summary {
+		exts = append(exts, "(summary to stdout)")
+	}
+
+	if len(exts) == 0 {
+		return "(select at least one option)"
+	}
+
+	// If only summary, no file output
+	if len(exts) == 1 && opts.Summary {
+		return exts[0]
+	}
+
+	// Build filename string
+	var fileExts []string
+	for _, e := range exts {
+		if !strings.HasPrefix(e, "(") {
+			fileExts = append(fileExts, e)
+		}
+	}
+
+	result := ""
+	if len(fileExts) > 0 {
+		if len(fileExts) == 1 {
+			result = m.outPath + fileExts[0]
+		} else {
+			result = m.outPath + ".{" + strings.Join(fileExts, ",")[1:] // strip leading dots, rejoin
+		}
+	}
+
+	if opts.Summary {
+		if result != "" {
+			result += " + summary"
+		} else {
+			result = "(summary to stdout)"
+		}
+	}
+
+	return result
 }
 
-func runDownload(url string, mode Mode) error {
-	switch mode {
-	case ModeVideo:
-		return downloadVideo(url)
-	case ModeAudio:
-		return downloadAudio(url)
-	case ModeSubs:
-		return downloadSubs(url)
-	case ModeAll:
-		if err := downloadVideo(url); err != nil {
-			return fmt.Errorf("video download failed: %w", err)
+func runDownload(url string, opts DownloadOptions) error {
+	// Run file downloads with spinner
+	if opts.Video || opts.Audio || opts.Subs {
+		if err := runWithSpinner(url, opts); err != nil {
+			return err
 		}
-		if err := downloadAudio(url); err != nil {
-			return fmt.Errorf("audio download failed: %w", err)
-		}
-		if err := downloadSubs(url); err != nil {
-			return fmt.Errorf("subtitle download failed: %w", err)
-		}
-		return nil
-	case ModeSummary:
+	}
+
+	// Summary runs separately (has its own output)
+	if opts.Summary {
 		return downloadSummary(url)
 	}
+
 	return nil
+}
+
+// Spinner model for download progress
+type downloadModel struct {
+	spinner spinner.Model
+	status  string
+	done    bool
+	err     error
+	url     string
+	opts    DownloadOptions
+	steps   []string // what to download, in order
+	step    int      // current step index
+}
+
+type downloadDoneMsg struct{ err error }
+
+func initialDownloadModel(url string, opts DownloadOptions) downloadModel {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("212"))
+
+	// Build list of steps based on options
+	var steps []string
+	if opts.Video {
+		steps = append(steps, "video")
+	}
+	if opts.Audio {
+		steps = append(steps, "audio")
+	}
+	if opts.Subs {
+		steps = append(steps, "subs")
+	}
+
+	dm := downloadModel{
+		spinner: s,
+		url:     url,
+		opts:    opts,
+		steps:   steps,
+		step:    0,
+	}
+	dm.status = dm.getStatusText()
+
+	return dm
+}
+
+func (m downloadModel) getStatusText() string {
+	if m.step >= len(m.steps) {
+		return "Done!"
+	}
+
+	stepName := m.steps[m.step]
+	total := len(m.steps)
+	current := m.step + 1
+
+	var desc string
+	switch stepName {
+	case "video":
+		desc = "Downloading video"
+	case "audio":
+		desc = "Downloading audio"
+	case "subs":
+		desc = "Downloading subtitles"
+	}
+
+	if total > 1 {
+		return fmt.Sprintf("%s (%d/%d)...", desc, current, total)
+	}
+	return desc + "..."
+}
+
+type startDownloadMsg struct{}
+
+func (m downloadModel) Init() tea.Cmd {
+	// Start spinner first, then trigger download on next tick
+	return tea.Batch(m.spinner.Tick, func() tea.Msg {
+		return startDownloadMsg{}
+	})
+}
+
+func (m downloadModel) runCurrentStep() tea.Cmd {
+	return func() tea.Msg {
+		if m.step >= len(m.steps) {
+			return downloadDoneMsg{err: nil}
+		}
+
+		var err error
+		switch m.steps[m.step] {
+		case "video":
+			err = doDownloadVideo(m.url)
+		case "audio":
+			err = doDownloadAudio(m.url)
+		case "subs":
+			err = doDownloadSubs(m.url)
+		}
+		return downloadDoneMsg{err: err}
+	}
+}
+
+func (m downloadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+
+	case startDownloadMsg:
+		return m, m.runCurrentStep()
+
+	case downloadDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.done = true
+			return m, tea.Quit
+		}
+
+		// Advance to next step
+		m.step++
+		if m.step < len(m.steps) {
+			m.status = m.getStatusText()
+			return m, m.runCurrentStep()
+		}
+
+		m.done = true
+		return m, tea.Quit
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m downloadModel) View() string {
+	if m.done {
+		return ""
+	}
+	return m.spinner.View() + " " + m.status
+}
+
+func runWithSpinner(url string, opts DownloadOptions) error {
+	p := tea.NewProgram(initialDownloadModel(url, opts), tea.WithOutput(os.Stderr))
+	finalModel, err := p.Run()
+	if err != nil {
+		return err
+	}
+
+	dm := finalModel.(downloadModel)
+	return dm.err
 }
 
 var outputDir string
 var customOutPath string
-
-func downloadVideo(url string) error {
-	fmt.Println("📹 Downloading video...")
-	args := []string{
-		"-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-		"--merge-output-format", "mp4",
-	}
-	args = append(args, "-o", getOutputPattern(".%(ext)s"))
-	args = append(args, url)
-	cmd := exec.Command("yt-dlp", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
 
 func getOutputPattern(ext string) string {
 	if customOutPath != "" {
@@ -325,35 +534,42 @@ func getOutputPattern(ext string) string {
 	return dir + "/%(title)s" + ext
 }
 
-func downloadAudio(url string) error {
-	fmt.Println("🎵 Downloading audio...")
+func doDownloadVideo(url string) error {
 	args := []string{
-		"-x",
-		"--audio-format", "mp3",
-		"--audio-quality", "0",
+		"-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+		"--merge-output-format", "mp4",
+		"-q", "--no-warnings",
 	}
 	args = append(args, "-o", getOutputPattern(".%(ext)s"))
 	args = append(args, url)
 	cmd := exec.Command("yt-dlp", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-func downloadSubs(url string) error {
-	fmt.Println("📝 Downloading subtitles...")
+func doDownloadAudio(url string) error {
+	args := []string{
+		"-x",
+		"--audio-format", "mp3",
+		"--audio-quality", "0",
+		"-q", "--no-warnings",
+	}
+	args = append(args, "-o", getOutputPattern(".%(ext)s"))
+	args = append(args, url)
+	cmd := exec.Command("yt-dlp", args...)
+	return cmd.Run()
+}
 
+func doDownloadSubs(url string) error {
 	cmd := exec.Command("yt-dlp",
 		"--write-subs",
 		"--write-auto-subs",
 		"--sub-lang", "en",
 		"--sub-format", "vtt",
 		"--skip-download",
+		"-q", "--no-warnings",
 		"-o", getOutputPattern(".%(ext)s"),
 		url,
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return err
 	}
@@ -362,6 +578,13 @@ func downloadSubs(url string) error {
 	searchDir := "."
 	if outputDir != "" {
 		searchDir = outputDir
+	}
+	if customOutPath != "" {
+		// Extract directory from custom path
+		lastSlash := strings.LastIndex(customOutPath, "/")
+		if lastSlash > 0 {
+			searchDir = customOutPath[:lastSlash]
+		}
 	}
 	return processSubtitles(searchDir)
 }
@@ -378,22 +601,20 @@ func processSubtitles(dir string) error {
 			vttPath := dir + "/" + entry.Name()
 			txtPath := dir + "/" + strings.TrimSuffix(entry.Name(), ".vtt") + ".txt"
 			if err := dedupeVTT(vttPath, txtPath); err != nil {
-				fmt.Printf("Warning: could not process %s: %v\n", entry.Name(), err)
 				continue
 			}
 			// Remove the original vtt file
 			os.Remove(vttPath)
-			fmt.Printf("✓ Created %s\n", txtPath)
 		}
 	}
 	return nil
 }
 
 func downloadSummary(url string) error {
-	fmt.Println("📝 Fetching subtitles for summary...")
+	fmt.Fprintln(os.Stderr, "📝 Fetching subtitles for summary...")
 
 	// Create temp dir for subtitle download
-	tmpDir, err := os.MkdirTemp("", "ytd-summary-")
+	tmpDir, err := os.MkdirTemp("", "tuber-summary-")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -409,7 +630,7 @@ func downloadSummary(url string) error {
 		"-o", tmpDir+"/%(title)s.%(ext)s",
 		url,
 	)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to download subtitles: %w", err)
@@ -439,9 +660,9 @@ func downloadSummary(url string) error {
 		return fmt.Errorf("failed to extract text: %w", err)
 	}
 
-	fmt.Println("\n🤖 Generating summary...\n")
+	fmt.Fprintln(os.Stderr, "\n🤖 Generating summary...\n")
 
-	// Pipe to claude
+	// Pipe to claude - summary goes to stdout so it can be captured
 	cmd = exec.Command("claude", "-p", "Summarize this transcript of a YouTube video. Provide a concise summary of the main points and key takeaways.")
 	cmd.Stdin = strings.NewReader(transcript)
 	cmd.Stdout = os.Stdout
@@ -557,12 +778,24 @@ func stripTags(s string) string {
 	return result.String()
 }
 
+var claudeAvailable bool
+
 func main() {
-	// Flags for quick access
-	videoFlag := flag.Bool("v", false, "Download video only")
-	audioFlag := flag.Bool("a", false, "Download audio only (mp3)")
-	subsFlag := flag.Bool("s", false, "Download subtitles only (text)")
-	allFlag := flag.Bool("all", false, "Download video, audio, and subtitles")
+	// Check for yt-dlp
+	if _, err := exec.LookPath("yt-dlp"); err != nil {
+		fmt.Fprintln(os.Stderr, "Error: yt-dlp not found in PATH")
+		fmt.Fprintln(os.Stderr, "Install it from: https://github.com/yt-dlp/yt-dlp")
+		os.Exit(1)
+	}
+
+	// Check for claude (optional)
+	_, err := exec.LookPath("claude")
+	claudeAvailable = err == nil
+
+	// Flags for quick access (can be combined)
+	videoFlag := flag.Bool("v", false, "Download video")
+	audioFlag := flag.Bool("a", false, "Download audio (mp3)")
+	subsFlag := flag.Bool("s", false, "Download subtitles (text)")
 	sumFlag := flag.Bool("sum", false, "Summarize video using AI")
 	outFlag := flag.String("o", "", "Output directory (default: current directory)")
 	flag.Parse()
@@ -575,47 +808,45 @@ func main() {
 		url = args[0]
 	}
 
-	// Check which flag is set
-	var mode Mode
-	flagSet := false
-
-	if *videoFlag {
-		mode = ModeVideo
-		flagSet = true
-	} else if *audioFlag {
-		mode = ModeAudio
-		flagSet = true
-	} else if *subsFlag {
-		mode = ModeSubs
-		flagSet = true
-	} else if *allFlag {
-		mode = ModeAll
-		flagSet = true
-	} else if *sumFlag {
-		mode = ModeSummary
-		flagSet = true
+	// Build options from flags
+	opts := DownloadOptions{
+		Video:   *videoFlag,
+		Audio:   *audioFlag,
+		Subs:    *subsFlag,
+		Summary: *sumFlag,
 	}
+
+	// Check if summary requested but claude not available
+	if opts.Summary && !claudeAvailable {
+		fmt.Fprintln(os.Stderr, "Error: -sum requires claude cli")
+		fmt.Fprintln(os.Stderr, "Install it from: https://claude.ai/download")
+		os.Exit(1)
+	}
+
+	flagSet := opts.Video || opts.Audio || opts.Subs || opts.Summary
 
 	// If flag set but no URL, show usage
 	if flagSet && url == "" {
-		fmt.Println("Usage: ytd [flags] <url>")
-		fmt.Println("\nFlags:")
-		fmt.Println("  -v        Download video only")
-		fmt.Println("  -a        Download audio only (mp3)")
-		fmt.Println("  -s        Download subtitles only (text)")
-		fmt.Println("  -all      Download everything")
+		fmt.Println("Usage: tuber [flags] <url>")
+		fmt.Println("\nFlags (can be combined):")
+		fmt.Println("  -v        Download video")
+		fmt.Println("  -a        Download audio (mp3)")
+		fmt.Println("  -s        Download subtitles (text)")
 		fmt.Println("  -sum      Summarize video using AI")
 		fmt.Println("  -o <dir>  Output directory")
+		fmt.Println("\nExamples:")
+		fmt.Println("  tuber -a -s <url>    Download audio and subtitles")
+		fmt.Println("  tuber -v -sum <url>  Download video and summarize")
 		fmt.Println("\nWithout flags, opens interactive menu.")
 		os.Exit(1)
 	}
 
 	// If no flag (or no URL), show interactive menu
-	if !flagSet || url == "" {
+	if !flagSet {
 		p := tea.NewProgram(initialModel(url))
 		m, err := p.Run()
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -623,17 +854,17 @@ func main() {
 		if finalModel.quitting {
 			os.Exit(0)
 		}
-		mode = finalModel.selected
+		opts = finalModel.getOptions()
 		url = finalModel.url
 		customOutPath = finalModel.outPath
 	}
 
-	fmt.Printf("\nDownloading %s from:\n%s\n\n", mode, url)
+	fmt.Fprintf(os.Stderr, "\nDownloading %s from:\n%s\n\n", opts, url)
 
-	if err := runDownload(url, mode); err != nil {
-		fmt.Printf("Error: %v\n", err)
+	if err := runDownload(url, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("\n✓ Done!")
+	fmt.Fprintln(os.Stderr, "\n✓ Done!")
 }
