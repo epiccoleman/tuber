@@ -18,6 +18,7 @@ type DownloadOptions struct {
 	Audio   bool
 	Subs    bool
 	Summary bool
+	Prompt  string
 }
 
 func (d DownloadOptions) String() string {
@@ -51,17 +52,19 @@ const (
 
 // TUI Model
 type model struct {
-	url       string
-	choices   []string
-	cursor    int
-	checked   []bool // which options are checked
-	done      bool
-	quitting  bool
-	title     string
-	outPath   string // full output path (dir + basename)
-	editing   bool
-	editBuf   string
-	state     uiState
+	url          string
+	choices      []string
+	cursor       int
+	checked      []bool // which options are checked
+	done         bool
+	quitting     bool
+	title        string
+	outPath      string // full output path (dir + basename)
+	editing      bool
+	editBuf      string
+	state        uiState
+	editingField string // "path" or "prompt"
+	prompt       string // custom summary prompt
 }
 
 // Message types for async operations
@@ -101,8 +104,11 @@ func initialModel(url string) model {
 		checked: make([]bool, 4),
 		state:   state,
 		outPath: dir + "/video", // fallback
+		prompt:  defaultPrompt,
 	}
 }
+
+const defaultPrompt = "Summarize this transcript of a YouTube video. Provide a concise summary of the main points and key takeaways."
 
 func (m model) getOptions() DownloadOptions {
 	return DownloadOptions{
@@ -110,6 +116,7 @@ func (m model) getOptions() DownloadOptions {
 		Audio:   m.checked[1],
 		Subs:    m.checked[2],
 		Summary: m.checked[3],
+		Prompt:  m.prompt,
 	}
 }
 
@@ -163,7 +170,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.editing {
 			switch msg.Type {
 			case tea.KeyEnter:
-				m.outPath = m.editBuf
+				if m.editingField == "path" {
+					m.outPath = m.editBuf
+				} else if m.editingField == "prompt" {
+					m.prompt = m.editBuf
+				}
 				m.editing = false
 			case tea.KeyEscape:
 				m.editing = false
@@ -206,7 +217,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "e":
 			m.editing = true
+			m.editingField = "path"
 			m.editBuf = m.outPath
+		case "p":
+			// Only allow prompt editing if claude is available
+			if claudeAvailable {
+				m.editing = true
+				m.editingField = "prompt"
+				m.editBuf = m.prompt
+			}
 		}
 	}
 	return m, nil
@@ -288,14 +307,31 @@ func (m model) View() string {
 		s += cursor + checkbox + " " + style.Render(choice) + "\n"
 	}
 
-	// Show filename preview
+	// Show filename preview and prompt
 	s += "\n"
 	if m.editing {
-		s += editStyle.Render("Output: ") + m.editBuf + editStyle.Render("▌") + "\n"
+		if m.editingField == "path" {
+			s += editStyle.Render("Output: ") + m.editBuf + editStyle.Render("▌") + "\n"
+		} else {
+			s += editStyle.Render("Prompt: ") + m.editBuf + editStyle.Render("▌") + "\n"
+		}
 		s += dimStyle.Render("enter to confirm • esc to cancel")
 	} else {
 		s += dimStyle.Render("Output: ") + filenameStyle.Render(m.getFilenames()) + "\n"
-		s += "\n" + dimStyle.Render("↑/↓ navigate • space toggle • enter download • e edit path • q quit")
+		if claudeAvailable && m.checked[3] {
+			// Show truncated prompt if summary is selected
+			promptPreview := m.prompt
+			if len(promptPreview) > 50 {
+				promptPreview = promptPreview[:47] + "..."
+			}
+			s += dimStyle.Render("Prompt: ") + promptPreview + "\n"
+		}
+		hints := "↑/↓ navigate • space toggle • enter download • e edit path"
+		if claudeAvailable {
+			hints += " • p edit prompt"
+		}
+		hints += " • q quit"
+		s += "\n" + dimStyle.Render(hints)
 	}
 	return s
 }
@@ -364,7 +400,11 @@ func runDownload(url string, opts DownloadOptions) error {
 
 	// Summary runs separately (has its own output)
 	if opts.Summary {
-		return downloadSummary(url)
+		prompt := opts.Prompt
+		if prompt == "" {
+			prompt = defaultPrompt
+		}
+		return downloadSummary(url, prompt)
 	}
 
 	return nil
@@ -610,7 +650,7 @@ func processSubtitles(dir string) error {
 	return nil
 }
 
-func downloadSummary(url string) error {
+func downloadSummary(url string, prompt string) error {
 	fmt.Fprintln(os.Stderr, "📝 Fetching subtitles for summary...")
 
 	// Create temp dir for subtitle download
@@ -663,7 +703,7 @@ func downloadSummary(url string) error {
 	fmt.Fprintln(os.Stderr, "\n🤖 Generating summary...\n")
 
 	// Pipe to claude - summary goes to stdout so it can be captured
-	cmd = exec.Command("claude", "-p", "Summarize this transcript of a YouTube video. Provide a concise summary of the main points and key takeaways.")
+	cmd = exec.Command("claude", "-p", prompt)
 	cmd.Stdin = strings.NewReader(transcript)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -797,6 +837,7 @@ func main() {
 	audioFlag := flag.Bool("a", false, "Download audio (mp3)")
 	subsFlag := flag.Bool("s", false, "Download subtitles (text)")
 	sumFlag := flag.Bool("sum", false, "Summarize video using AI")
+	promptFlag := flag.String("p", "", "Custom prompt for summary")
 	outFlag := flag.String("o", "", "Output directory (default: current directory)")
 	flag.Parse()
 
@@ -809,11 +850,17 @@ func main() {
 	}
 
 	// Build options from flags
+	prompt := defaultPrompt
+	if *promptFlag != "" {
+		prompt = *promptFlag
+	}
+
 	opts := DownloadOptions{
 		Video:   *videoFlag,
 		Audio:   *audioFlag,
 		Subs:    *subsFlag,
 		Summary: *sumFlag,
+		Prompt:  prompt,
 	}
 
 	// Check if summary requested but claude not available
@@ -829,14 +876,15 @@ func main() {
 	if flagSet && url == "" {
 		fmt.Println("Usage: tuber [flags] <url>")
 		fmt.Println("\nFlags (can be combined):")
-		fmt.Println("  -v        Download video")
-		fmt.Println("  -a        Download audio (mp3)")
-		fmt.Println("  -s        Download subtitles (text)")
-		fmt.Println("  -sum      Summarize video using AI")
-		fmt.Println("  -o <dir>  Output directory")
+		fmt.Println("  -v             Download video")
+		fmt.Println("  -a             Download audio (mp3)")
+		fmt.Println("  -s             Download subtitles (text)")
+		fmt.Println("  -sum           Summarize video using AI")
+		fmt.Println("  -p <prompt>    Custom prompt for summary")
+		fmt.Println("  -o <dir>       Output directory")
 		fmt.Println("\nExamples:")
-		fmt.Println("  tuber -a -s <url>    Download audio and subtitles")
-		fmt.Println("  tuber -v -sum <url>  Download video and summarize")
+		fmt.Println("  tuber -a -s <url>                    Download audio and subtitles")
+		fmt.Println("  tuber -sum -p \"List key points\" <url>  Summarize with custom prompt")
 		fmt.Println("\nWithout flags, opens interactive menu.")
 		os.Exit(1)
 	}
